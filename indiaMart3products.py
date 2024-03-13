@@ -1,33 +1,69 @@
-from bs4 import BeautifulSoup
-import requests
+import sys
 
-def search_product(product_name):
-    search_query = product_name + ' indiamart'
-    google_url = "https://www.google.com/search?q=" + search_query
-    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    response = requests.get(google_url, headers={'User-Agent': user_agent})
-    soup = BeautifulSoup(response.text, 'lxml')
-    div_tags = soup.find_all('div', attrs={'class': 'MjjYud'})
+import pandas as pd
+from loguru import logger
+from selenium.webdriver import Chrome
 
-    hrefs = []
-    for div_tag in div_tags[:3]:
-        href = div_tag.find('a', attrs={'jsname': 'UWckNb'}).get('href') if div_tag else None
-        if href and href[:25]=="https://www.indiamart.com":
-            hrefs.append(href)
+from utils.utils_company_details import get_company_details
+from utils.utils_find_links import get_first_site_link
+from utils.utils_global import (
+    get_companies_dataframe,
+    managed_selenium_driver,
+    close_current_tab_and_switch_to_new_one,
+    get_random_filename,
+    write_dict_to_csv, get_all_states_of_india,
+)
+from utils.utils_google_page import get_google_page
+from utils.utils_owner_details import get_owner_details
+from utils.utils_website_scraper import Company
 
-    product_data = []
-    for href in hrefs:
-        product_response = requests.get(href, headers={'User-Agent': user_agent})
-        product_soup = BeautifulSoup(product_response.text, 'lxml')
-        product_name_tag = product_soup.find('h1', attrs={'class': 'bo center-heading'})
-        product_name = product_name_tag.text if product_name_tag else None
-        price_tag = product_soup.find('span', attrs={'class': 'bo price-unit'})
-        price = price_tag.text if price_tag else None
-        product_data.append((product_name, href, price))
 
-    return product_data
+def scrape_from_web(driver: Chrome, company: pd.Series, filename: str, states: list):
+    link = get_first_site_link(driver=driver)
+    if not isinstance(link, str):
+        return None
 
-product_name = input("Enter a product name: ")
-product_data = search_product(product_name)
-for data in product_data:
-    print(f"Product Name: {data[0]}\nURL: {data[1]}\nPrice: {data[2]}\n")
+    company_instance = Company(
+        driver=driver,
+        gstin=company.GSTIN,
+        company_name=company.COMPANY_NAME,
+        page_link=link,
+        states=states
+    )
+    scraped_data = company_instance.get_scraped_data()
+    scraped_data.update(get_owner_details(scraped_data))
+    scraped_data.update(
+        get_company_details(
+            driver=driver, company_name=scraped_data.get("company name")
+        )
+    )
+    logger.info(scraped_data)
+    write_dict_to_csv(file_path=filename, data_dict=scraped_data)
+
+
+def main(input_file_name: str, filename: str, offset: int):
+    companies = get_companies_dataframe(path=input_file_name)
+    if not isinstance(companies, pd.DataFrame):
+        sys.exit()
+
+    with managed_selenium_driver() as driver:
+        for index, company in companies.iterrows():
+            if int(index) < offset:
+                continue
+
+            if get_google_page(driver=driver, company=company):
+                states = get_all_states_of_india(path="uploads/states.csv")
+                scrape_from_web(driver=driver, company=company, filename=filename, states=states)
+                close_current_tab_and_switch_to_new_one(driver)
+            else:
+                return None
+
+
+if __name__ == "__main__":
+    input_folder_path = "uploads/"
+    output_folder_path = "shared/outgoing/"
+    input_file = f"{input_folder_path}companies.csv"
+    output_file = get_random_filename(
+        path=output_folder_path, size=25, extension=".csv"
+    )
+    main(input_file_name=input_file, filename=output_file, offset=0)
